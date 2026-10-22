@@ -1,0 +1,10 @@
+---
+# Shared settings for all workshop VMs. Keep real credentials out of commits.
+workshop_user: ubuntu
+workshop_dir: /opt/magic-workshop
+
+workshop_letsencrypt_email: "test@example.com"
+
+workshop_magic_client_id: ""
+workshop_magic_client_secret: ""
+workshop_magic_tenant_id: ""

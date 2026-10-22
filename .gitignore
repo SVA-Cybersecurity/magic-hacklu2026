@@ -1,0 +1,3 @@
+# Local participant lists may contain personal data and passwords.
+*.csv
+.participants/

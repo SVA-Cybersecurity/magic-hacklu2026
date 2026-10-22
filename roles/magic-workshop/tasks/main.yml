@@ -1,0 +1,376 @@
+---
+#- name: Validate central configuration
+#  ansible.builtin.assert:
+#    that:
+#      - workshop_domain | length > 0
+#      - workshop_domain is not match('^[0-9.]+$')
+#      - workshop_letsencrypt_email | length > 0
+#      - workshop_magic_client_id | length > 0
+#      - workshop_magic_client_secret | length > 0
+#      - workshop_magic_tenant_id | length > 0
+#      - workshop_participants_csv_path | length > 0
+#    fail_msg: >-
+#      Set the workshop domain, Let's Encrypt email, MAGIC credentials and
+#      participant CSV path in the inventory, and shared credentials in
+#      group_vars/all.yml before deploying.
+#    quiet: true
+
+- name: Resolve the participant CSV path on the Ansible controller
+  tags: [generate_files]
+  ansible.builtin.set_fact:
+    workshop_participants_csv_local_path: >-
+      {{ workshop_participants_csv_path if workshop_participants_csv_path is
+      match('^/') else (playbook_dir | dirname) ~ '/' ~ workshop_participants_csv_path }}
+
+- name: Create the participant CSV directory on the controller
+  tags: [generate_files]
+  become: false
+  delegate_to: localhost
+  ansible.builtin.file:
+    path: "{{ workshop_participants_csv_local_path | dirname }}"
+    state: directory
+
+- name: Check whether the participant CSV exists on the controller
+  tags: [generate_files]
+  become: false
+  delegate_to: localhost
+  ansible.builtin.stat:
+    path: "{{ workshop_participants_csv_local_path }}"
+  register: _workshop_participants_csv
+
+- name: Generate a 20-user participant CSV when it is missing
+  tags: [generate_files]
+  become: false
+  delegate_to: localhost
+  ansible.builtin.template:
+    src: participants.default.csv.j2
+    dest: "{{ workshop_participants_csv_local_path }}"
+    mode: "0600"
+    force: false
+  when: not _workshop_participants_csv.stat.exists
+
+- name: Validate the participant CSV
+  tags: [generate_files]
+  ansible.builtin.assert:
+    that:
+      - lookup('ansible.builtin.file', workshop_participants_csv_local_path) | trim | split('\n') | length > 1
+      - "'username,full_name,email,password' in lookup('ansible.builtin.file', workshop_participants_csv_local_path) or 'username,full_name,email,ts_password,jh_password' in lookup('ansible.builtin.file', workshop_participants_csv_local_path)"
+    fail_msg: >-
+      The CSV at {{ workshop_participants_csv_path }} must have the expected
+      header and at least one participant row.
+    quiet: true
+  no_log: true
+
+- name: Install Docker, Compose and deployment packages
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - certbot
+      - curl
+      - docker-buildx
+      - docker-compose-v2
+      - docker.io
+      - make
+      - openssl
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Start Docker and enable it at boot
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Add the workshop user to the docker group
+  ansible.builtin.user:
+    name: "{{ workshop_user }}"
+    groups: docker
+    append: true
+
+- name: Refresh the connection to apply docker group membership
+  ansible.builtin.meta: reset_connection
+
+- name: Persist vm.max_map_count for OpenSearch
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/90-magic-workshop.conf
+    content: "vm.max_map_count = 262144\n"
+    mode: "0644"
+  register: _workshop_sysctl
+
+- name: Apply vm.max_map_count
+  ansible.builtin.command: sysctl -p /etc/sysctl.d/90-magic-workshop.conf
+  when: _workshop_sysctl.changed
+  changed_when: true
+
+- name: Create the workshop directory
+  ansible.builtin.file:
+    path: "{{ workshop_dir }}"
+    state: directory
+    owner: "{{ workshop_user }}"
+    group: "{{ workshop_user }}"
+    mode: "0750"
+
+- name: Copy the integrated workshop files to the host
+  ansible.builtin.copy:
+    src: workshop/
+    dest: "{{ workshop_dir }}/"
+    owner: "{{ workshop_user }}"
+    group: "{{ workshop_user }}"
+    directory_mode: "0750"
+
+- name: Make workshop scripts executable
+  ansible.builtin.file:
+    path: "{{ workshop_dir }}/scripts/{{ item }}"
+    mode: "0750"
+  loop:
+    - bootstrap.sh
+    - gen-certs.sh
+    - gen-htpasswd.sh
+
+- name: Bootstrap runtime configuration and directories
+  become_user: "{{ workshop_user }}"
+  ansible.builtin.command: make bootstrap
+  args:
+    chdir: "{{ workshop_dir }}"
+  changed_when: false
+
+- name: Configure the public hostname in .env
+  ansible.builtin.lineinfile:
+    path: "{{ workshop_dir }}/.env"
+    regexp: '^PUBLIC_HOSTNAME='
+    line: "PUBLIC_HOSTNAME={{ workshop_domain }}"
+    owner: "{{ workshop_user }}"
+    group: "{{ workshop_user }}"
+    mode: "0600"
+
+- name: Configure the workshop root in .env
+  ansible.builtin.lineinfile:
+    path: "{{ workshop_dir }}/.env"
+    regexp: '^WORKSHOP_ROOT='
+    line: "WORKSHOP_ROOT={{ workshop_dir }}"
+    owner: "{{ workshop_user }}"
+    group: "{{ workshop_user }}"
+    mode: "0600"
+
+- name: Configure MAGIC client ID
+  ansible.builtin.lineinfile:
+    path: "{{ workshop_dir }}/.env"
+    regexp: '^MAGIC_CLIENT_ID='
+    line: "MAGIC_CLIENT_ID={{ workshop_magic_client_id }}"
+    owner: "{{ workshop_user }}"
+    group: "{{ workshop_user }}"
+    mode: "0600"
+  no_log: true
+
+- name: Configure MAGIC client secret
+  ansible.builtin.lineinfile:
+    path: "{{ workshop_dir }}/.env"
+    regexp: '^MAGIC_CLIENT_SECRET='
+    line: "MAGIC_CLIENT_SECRET={{ workshop_magic_client_secret }}"
+    owner: "{{ workshop_user }}"
+    group: "{{ workshop_user }}"
+    mode: "0600"
+  no_log: true
+
+- name: Configure MAGIC tenant ID
+  ansible.builtin.lineinfile:
+    path: "{{ workshop_dir }}/.env"
+    regexp: '^MAGIC_TENANT_ID='
+    line: "MAGIC_TENANT_ID={{ workshop_magic_tenant_id }}"
+    owner: "{{ workshop_user }}"
+    group: "{{ workshop_user }}"
+    mode: "0600"
+  no_log: true
+
+- name: Write the participant CSV
+  ansible.builtin.copy:
+    src: "{{ workshop_participants_csv_local_path }}"
+    dest: "{{ workshop_dir }}/participants.csv"
+    owner: "{{ workshop_user }}"
+    group: "{{ workshop_user }}"
+    mode: "0600"
+  no_log: true
+
+- name: Create the ACME webroot
+  ansible.builtin.file:
+    path: /var/www/letsencrypt
+    state: directory
+    mode: "0755"
+
+- name: Check whether a Let's Encrypt certificate already exists
+  ansible.builtin.stat:
+    path: "/etc/letsencrypt/live/{{ workshop_domain }}/fullchain.pem"
+  register: _workshop_certificate
+
+- name: Render nginx with the existing certificate state
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: "{{ workshop_dir }}/config/nginx/nginx.domain.conf"
+    owner: "{{ workshop_user }}"
+    group: "{{ workshop_user }}"
+    mode: "0644"
+  vars:
+    workshop_tls_enabled: "{{ _workshop_certificate.stat.exists }}"
+
+- name: Mount nginx config, ACME webroot and Let's Encrypt certificates
+  ansible.builtin.copy:
+    dest: "{{ workshop_dir }}/docker-compose.override.yml"
+    content: |
+      # Managed by Ansible
+      services:
+        nginx:
+          volumes:
+            - ./config/nginx/nginx.domain.conf:/etc/nginx/nginx.conf:ro
+            - /var/www/letsencrypt:/var/www/letsencrypt:ro
+            - /etc/letsencrypt:/etc/letsencrypt:ro
+    owner: "{{ workshop_user }}"
+    group: "{{ workshop_user }}"
+    mode: "0644"
+
+- name: Build workshop images
+  become_user: "{{ workshop_user }}"
+  ansible.builtin.command: make build
+  args:
+    chdir: "{{ workshop_dir }}"
+
+- name: Validate Docker Compose configuration
+  become_user: "{{ workshop_user }}"
+  ansible.builtin.command: docker compose config --quiet
+  args:
+    chdir: "{{ workshop_dir }}"
+  changed_when: false
+
+- name: Start the workshop stack for ACME validation
+  become_user: "{{ workshop_user }}"
+  ansible.builtin.command: docker compose up -d
+  args:
+    chdir: "{{ workshop_dir }}"
+
+- name: Wait for nginx to serve the ACME HTTP endpoint
+  ansible.builtin.uri:
+    url: http://127.0.0.1/
+    headers:
+      Host: "{{ workshop_domain }}"
+    follow_redirects: none
+    status_code: 301
+  register: _workshop_http
+  retries: 30
+  delay: 10
+  until: _workshop_http.status == 301
+  when: not _workshop_certificate.stat.exists
+
+- name: Validate Let's Encrypt email before requesting the certificate
+  ansible.builtin.assert:
+    that:
+      - workshop_letsencrypt_email | trim | length > 0
+    fail_msg: "workshop_letsencrypt_email is empty; set it in group_vars/all.yml."
+    quiet: true
+
+- name: Request the Let's Encrypt certificate
+  ansible.builtin.command:
+    argv:
+      - certbot
+      - certonly
+      - --webroot
+      - --webroot-path
+      - /var/www/letsencrypt
+      - --domain
+      - "{{ workshop_domain }}"
+      - "--email={{ workshop_letsencrypt_email }}"
+      - --agree-tos
+      - --non-interactive
+      - --keep-until-expiring
+  args:
+    creates: "/etc/letsencrypt/live/{{ workshop_domain }}/fullchain.pem"
+  register: _workshop_certbot
+
+- name: Render nginx with HTTPS enabled
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: "{{ workshop_dir }}/config/nginx/nginx.domain.conf"
+    owner: "{{ workshop_user }}"
+    group: "{{ workshop_user }}"
+    mode: "0644"
+  vars:
+    workshop_tls_enabled: true
+
+- name: Restart nginx with the issued certificate
+  become_user: "{{ workshop_user }}"
+  ansible.builtin.command: docker compose restart nginx
+  args:
+    chdir: "{{ workshop_dir }}"
+
+- name: Wait for Timesketch to finish starting
+  become_user: "{{ workshop_user }}"
+  ansible.builtin.command: docker compose exec -T timesketch-web tsctl list-users --status
+  args:
+    chdir: "{{ workshop_dir }}"
+  register: _workshop_timesketch
+  changed_when: false
+  failed_when: false
+  retries: 30
+  delay: 10
+  until: _workshop_timesketch.rc == 0
+
+- name: Provision workshop participants
+  become_user: "{{ workshop_user }}"
+  ansible.builtin.command: make provision
+  args:
+    chdir: "{{ workshop_dir }}"
+  #no_log: true
+
+- name: Create the certificate renewal hook directory
+  ansible.builtin.file:
+    path: /etc/letsencrypt/renewal-hooks/deploy
+    state: directory
+    mode: "0755"
+
+- name: Install the certificate renewal deploy hook
+  ansible.builtin.copy:
+    dest: /etc/letsencrypt/renewal-hooks/deploy/reload-magic-workshop-nginx
+    content: |
+      #!/bin/sh
+      /usr/bin/docker compose -f {{ workshop_dir }}/docker-compose.yml -f {{ workshop_dir }}/docker-compose.override.yml restart nginx
+    mode: "0750"
+
+- name: Install the certificate renewal service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/magic-workshop-certbot-renew.service
+    content: |
+      [Unit]
+      Description=Renew the MAGIC Workshop TLS certificate
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/bin/certbot renew --quiet
+    mode: "0644"
+  register: _workshop_renew_service
+
+- name: Install the certificate renewal timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/magic-workshop-certbot-renew.timer
+    content: |
+      [Unit]
+      Description=Twice-daily renewal check for the MAGIC Workshop certificate
+
+      [Timer]
+      OnCalendar=*-*-* 03,15:00:00
+      RandomizedDelaySec=1h
+      Persistent=true
+      Unit=magic-workshop-certbot-renew.service
+
+      [Install]
+      WantedBy=timers.target
+    mode: "0644"
+  register: _workshop_renew_timer
+
+- name: Reload systemd after renewal unit changes
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: _workshop_renew_service.changed or _workshop_renew_timer.changed
+
+- name: Enable automatic certificate renewal
+  ansible.builtin.systemd:
+    name: magic-workshop-certbot-renew.timer
+    state: started
+    enabled: true

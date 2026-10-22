@@ -1,0 +1,6 @@
+username,full_name,email,password
+{% set participant_offset = groups['workshops'].index(inventory_hostname) * 20 %}
+{% for number in range(participant_offset + 1, participant_offset + 21) %}
+{% set password = lookup('ansible.builtin.password', '/dev/null', length=16, chars=['ascii_letters', 'digits']) %}
+participant{{ '%02d' | format(number) }},Participant {{ '%02d' | format(number) }},,{{ password }}
+{% endfor %}

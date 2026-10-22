@@ -1,0 +1,11 @@
+---
+# Deployment configuration is kept in group_vars/all.yml.
+workshop_domain: ""
+workshop_letsencrypt_email: ""
+workshop_magic_client_id: ""
+workshop_magic_client_secret: ""
+workshop_magic_tenant_id: ""
+workshop_participants_csv_path: ""
+
+workshop_user: ubuntu
+workshop_dir: /opt/magic-workshop

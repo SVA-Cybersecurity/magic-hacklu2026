@@ -1,0 +1,212 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# MAGIC Workshop \u2014 Getting Started\n",
+    "\n",
+    "Hello **${FULL_NAME}**. This notebook and its environment are already set up for you:\n",
+    "\n",
+    "| | |\n",
+    "|---|---|\n",
+    "| Timesketch user | `${TS_USERNAME}` |\n",
+    "| Your sketch | `${SKETCH_NAME}` (id `${SKETCH_ID}`) |\n",
+    "| Timesketch UI | ${PUBLIC_URL} |\n",
+    "| MAGIC config | `~/work/config.yaml` (M365 app credentials pre-filled) |\n",
+    "\n",
+    "Everything you create lives in `~/work`, which is private to you and survives a server restart.\n",
+    "\n",
+    "Work through the cells top to bottom."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Provisioned automatically \u2014 no need to edit.\n",
+    "TIMESKETCH_URL = \"${TIMESKETCH_HOST_URI}\"\n",
+    "TIMESKETCH_USER = \"${TS_USERNAME}\"\n",
+    "TIMESKETCH_PASSWORD = \"${PASSWORD}\"\n",
+    "SKETCH_ID = ${SKETCH_ID}\n",
+    "\n",
+    "MAGIC_CONFIG = \"/home/jovyan/work/config.yaml\"\n",
+    "MAGIC_OUTPUT = \"/home/jovyan/work/output\"\n",
+    "MAGIC_LOGS = \"/home/jovyan/work/logs\"\n",
+    "\n",
+    "print(\"Timesketch user:\", TIMESKETCH_USER, \"| sketch id:\", SKETCH_ID)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 1. Connect to Timesketch"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import urllib3\n",
+    "from timesketch_api_client import client as ts_client\n",
+    "\n",
+    "urllib3.disable_warnings()\n",
+    "\n",
+    "ts = ts_client.TimesketchApi(\n",
+    "    host_uri=TIMESKETCH_URL,\n",
+    "    username=TIMESKETCH_USER,\n",
+    "    password=TIMESKETCH_PASSWORD,\n",
+    "    verify=False,\n",
+    ")\n",
+    "sketch = ts.get_sketch(SKETCH_ID)\n",
+    "print(\"Connected to sketch:\", sketch.name)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 2. Define the collection scope\n",
+    "\n",
+    "Open `config.yaml` in the file browser and set `user_principal_names`,\n",
+    "`date_start` and `date_end` for your assigned case, then re-run the cell below\n",
+    "to confirm what MAGIC will collect."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "print(open(MAGIC_CONFIG).read())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 3. Check the app's Graph permissions\n",
+    "\n",
+    "`--manifest` lists the permissions your configured crawl modules require,\n",
+    "without downloading anything."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import subprocess\n",
+    "\n",
+    "\n",
+    "def run_magic(*extra):\n",
+    "    cmd = [\n",
+    "        \"magic\",\n",
+    "        \"-c\", MAGIC_CONFIG,\n",
+    "        \"-o\", MAGIC_OUTPUT,\n",
+    "        \"--reports-dir\", MAGIC_LOGS,\n",
+    "        *extra,\n",
+    "    ]\n",
+    "\n",
+    "    proc = subprocess.run(cmd)\n",
+    "    return proc.returncode\n",
+    "\n",
+    "run_magic(\"--manifest\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 4. Collect the evidence\n",
+    "\n",
+    "This calls the Microsoft Graph API and writes `output/base.jsonl` plus the\n",
+    "Timesketch-ready `output/timesketch.jsonl`. It can take a few minutes."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "run_magic()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 5. Import the timeline into your sketch"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from pathlib import Path\n",
+    "\n",
+    "from timesketch_import_client import importer\n",
+    "\n",
+    "jsonl = Path(MAGIC_OUTPUT) / \"timesketch.jsonl\"\n",
+    "print(jsonl, \"exists:\", jsonl.exists())\n",
+    "\n",
+    "with importer.ImportStreamer() as streamer:\n",
+    "    streamer.set_sketch(sketch)\n",
+    "    streamer.set_timeline_name(\"magic-\" + TIMESKETCH_USER)\n",
+    "    streamer.set_provider(\"MAGIC\")\n",
+    "    streamer.add_file(str(jsonl))\n",
+    "\n",
+    "# The timeline only exists once the streamer has flushed on block exit.\n",
+    "print(\"timelines in sketch:\", [t.name for t in sketch.list_timelines()])"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 6. Query it back as a DataFrame\n",
+    "\n",
+    "Open ${PUBLIC_URL} to explore the same data in the Timesketch UI."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from timesketch_api_client import search\n",
+    "\n",
+    "s = search.Search(sketch=sketch)\n",
+    "s.query_string = \"*\"\n",
+    "s.max_entries = 500\n",
+    "\n",
+    "df = s.table\n",
+    "print(len(df), \"events\")\n",
+    "df.head(20)"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3 (ipykernel)",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "name": "python"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
